@@ -1,0 +1,84 @@
+#!/bin/bash
+
+clamav=$(which clamav)
+yara=$(which yara)
+
+function cleanup {
+
+  sync; sync
+
+  container_ids=$(docker ps -a | egrep "viruscan|blacktop/yara" | awk '{ print $1 }' | tr '\n' ' ')
+  if [ -n "$container_ids" ];
+  then
+    echo
+    echo "Stopping Docker Containers: $container_ids"
+    docker stop $container_ids
+    echo "Removing Docker Containers: $container_ids"
+    docker rm -f $container_ids
+  fi
+
+  if [ -f "$log_file" ];
+  then
+
+    seemsToHaveScaned=$(egrep "^Done" $log_file)
+
+    if [ -z "$seemsToHaveScaned" ];
+    then
+      echo
+      echo "Scan cancelled possibly - Don't forget to delete $log_file if you do not need it"
+      echo
+    else
+      echo
+      echo "Logged to $log_file"
+      echo
+    fi
+  fi
+}
+
+if [ -z "$clamav" ];
+then
+  echo "clamav not found"
+  exit
+fi
+if [ -z "$yara" ];
+then
+  echo "yara not found"
+  exit
+fi
+
+cmd=$1
+
+if [ "$cmd" == "update" ];
+then
+  clamav update
+  yara update
+  exit
+fi
+
+# You can amend this bit or create another command to suit to your situation
+if [ "$cmd" == "go" ];
+then
+
+  trap cleanup EXIT
+
+  log_file=output_$(basename $0)-$(date +%Y%m%d%H%M%S).txt
+
+  # clamav_args=-ri" # "-i" is to show only infected files
+  clamav_args=-r
+  yara_args=-wrmfs
+
+  echo
+  echo "Logging to $log_file"
+  echo "(Ctrl-C to quit running this command which takes time until you see the prompt)"
+
+  echo > $log_file
+  $clamav scan $clamav_args . 2>&1 | tee --append $log_file
+  $yara scan $yara_args . 2>&1 | tee --append $log_file
+
+  cleanup
+
+  exit
+fi
+
+echo "Usage 1: $(basename $0) update"
+echo "Usage 2: $(basename $0) scan"

@@ -1,0 +1,205 @@
+#!/bin/bash
+
+#
+# Maintainer: Brisbane Web Developer <brisbanewebdeveloper@outlook.com>
+#
+
+hasDocker=$(which docker)
+if [ -z "$hasDocker" ];
+then
+  echo "You must install Docker"
+  exit
+fi
+
+# viruscan_command
+# viruscan-master_command
+image=$(docker images | egrep "^viruscan.*_command" | awk '{ print $1 }')
+if [ -z "$image" ];
+then
+  echo "Docker Image not found"
+  exit
+fi
+
+#
+# Download Docker Image if not downloaded
+#
+# This is now done via the installation
+#
+# hasImage=$(docker images | egrep "^$image")
+# if [ -z "$hasImage" ];
+# then
+#   echo
+#   echo "Building the image"
+#   docker-compose build
+# fi
+
+#
+# This script creates the database directory under your home directory
+#
+base_dir=~/viruscan/clamav
+if [ ! -d "$base_dir" ];
+then
+  mkdir -p $base_dir && \
+  chmod 777 $base_dir && \
+  echo "Created $base_dir"
+fi
+
+#
+# Enable to scan with https://github.com/extremeshok/clamav-unofficial-sigs.git
+#
+clamav_unofficial_sigs_script="clamav_unofficial_sigs.sh"
+clamav_unofficial_sigs_path="$base_dir/$clamav_unofficial_sigs_script"
+clamav_unofficial_sigs_dir="$base_dir/clamav-unofficial-sigs"
+if [ ! -d "$clamav_unofficial_sigs_dir" ];
+then
+
+  echo "Downloading ClamAV Unofficial Signatures to $clamav_unofficial_sigs_dir" && \
+  git clone https://github.com/extremeshok/clamav-unofficial-sigs.git $clamav_unofficial_sigs_dir && \
+  echo "#!/bin/bash" > $clamav_unofficial_sigs_path && \
+  echo "" >> $clamav_unofficial_sigs_path && \
+  echo "clamd" >> $clamav_unofficial_sigs_path && \
+  echo "/bin/bash /var/lib/clamav/clamav-unofficial-sigs/clamav-unofficial-sigs.sh --upgrade" >> $clamav_unofficial_sigs_path && \
+  echo "/bin/bash /var/lib/clamav/clamav-unofficial-sigs/clamav-unofficial-sigs.sh" >> $clamav_unofficial_sigs_path && \
+  echo "Created $clamav_unofficial_sigs_path for https://github.com/extremeshok/clamav-unofficial-sigs.git"
+
+fi
+
+#
+# Enabled to scan with https://github.com/Hestat/lw-yara.git
+#
+lw_yara="$base_dir/lw-yara"
+if [ ! -d "$lw_yara" ];
+then
+  echo "Downloading Yara Ruleset to $lw_yara"
+  git clone https://github.com/Hestat/lw-yara.git $lw_yara
+fi
+
+cmd=$1
+
+#
+# Update the database
+#
+if [ "$cmd" == "update" ];
+then
+
+  echo
+  echo "Updating the directory $base_dir"
+  echo "(It may take time like you could make a cup of coffee)"
+  echo
+
+  cd $clamav_unofficial_sigs_dir && \
+  git fetch && \
+  git reset --hard origin/master && \
+  cd - > /dev/null
+
+  cd $lw_yara && \
+  git fetch && \
+  git reset --hard origin/master && \
+  cd - > /dev/null
+
+  docker \
+    run \
+    --rm \
+    -it \
+    -v $clamav_unofficial_sigs_dir/config/master.conf:/etc/clamav-unofficial-sigs/master.conf \
+    -v $clamav_unofficial_sigs_dir/config/user.conf:/etc/clamav-unofficial-sigs/user.conf \
+    -v $clamav_unofficial_sigs_dir/os/os.alpine.conf:/etc/clamav-unofficial-sigs/os.conf \
+    -v $base_dir:/var/lib/clamav \
+    $image \
+    /bin/bash /var/lib/clamav/$clamav_unofficial_sigs_script
+
+  docker \
+    run \
+    --rm \
+    -it \
+    -v $base_dir:/var/lib/clamav \
+    $image \
+    /usr/bin/freshclam
+
+  exit
+
+fi
+
+#
+# Scan
+#
+if [ "$cmd" == "scan" ];
+then
+
+  #
+  # The last argument is to be the path to scan and it needs to be absolute path
+  # In case you want to avoid figuring the exact path, you can do like this:
+  #
+  # cd directory_to_scan; clamav .
+  # clamav $(pwd)/directory_to_scan
+  #
+  scan_dir=${!#}
+
+  if [ "$scan_dir" == "." ];
+  then
+    scan_dir=$(pwd)
+  fi
+
+  if [ ! -d "$scan_dir" ];
+  then
+    echo "Invalid directory $scan_dir"
+    exit
+  fi
+
+  # Take out the first and last argument
+  set -- "${@:2:$(($#-2))}"
+
+  echo
+  echo "[ClamAV]"
+  echo "Scanning directory $scan_dir"
+  echo "(It may take about 30 seconds until you see the first output)"
+  echo "Args: $@"
+  echo
+
+  docker \
+    run \
+    --rm \
+    -v $base_dir:/var/lib/clamav \
+    -v $scan_dir:/code:ro \
+    -v $log_dir:/viruscan/logs \
+    $image \
+    /usr/bin/clamscan \
+      -d /var/lib/clamav \
+      -d /var/lib/clamav/lw-yara/lw-rules_index.yar \
+      $@ \
+      /code 2>&1 | \
+  sed -E 's/^\/code/./g'
+
+  echo
+  echo "Done"
+  echo
+
+  exit
+
+fi
+
+#
+# Another Command
+#
+
+#
+# You must execute something like /bin/bash
+# The default behaviour which is to start ClamAV Daemon happens otherwise
+#
+if [ -z "$cmd" ];
+then
+  echo "You must execute something"
+  exit
+fi
+
+echo
+echo "Excuting $cmd..."
+echo
+
+docker \
+  run \
+  --rm \
+  -it \
+  -v $base_dir:/var/lib/clamav \
+  $image \
+  $@
