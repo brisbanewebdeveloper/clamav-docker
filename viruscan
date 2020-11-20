@@ -1,0 +1,147 @@
+#!/bin/bash
+
+clamav=$(which clamav)
+yara=$(which yara)
+
+function cleanup {
+
+  sync; sync
+
+  container_ids=$(docker ps -a | egrep "viruscan|blacktop/yara" | awk '{ print $1 }' | tr '\n' ' ')
+  if [ -n "$container_ids" ];
+  then
+    echo
+    echo "Stopping Docker Containers: $container_ids"
+    docker stop $container_ids > /dev/null
+    echo "Removing Docker Containers: $container_ids"
+    docker rm -f $container_ids > /dev/null
+  fi
+
+  if [ "$finished" == 0 ] && [ -f "$log_file" ];
+  then
+
+    seemsToHaveScaned=$(egrep "^Done" $log_file)
+
+    if [ -z "$seemsToHaveScaned" ];
+    then
+      echo
+      echo "Scan cancelled possibly - Don't forget to delete $log_file if you do not need it"
+      echo
+    else
+      echo
+      echo "Logged to $log_file"
+      echo
+    fi
+  fi
+
+  exit
+}
+
+if [ -z "$clamav" ];
+then
+  echo "clamav not found"
+  exit
+fi
+if [ -z "$yara" ];
+then
+  echo "yara not found"
+  exit
+fi
+
+cmd=$1
+
+if [ "$cmd" == "update" ];
+then
+  clamav update
+  yara update
+  exit
+fi
+
+# You can amend this bit or create another command to suit to your situation
+if [ "$cmd" == "go" ];
+then
+
+  trap cleanup EXIT
+
+  finished=0
+
+  log_file=output_$(basename $0)-$(date +%Y%m%d%H%M%S).txt
+
+  # clamav_args=-ri" # "-i" is to show only infected files
+  clamav_args=-r
+
+  lscpu=$(which lscpu)
+  if [ -n "$lscpu" ];
+  then
+    THREAD_PER_CPU=`lscpu | egrep "^Thread" | awk '{ print $4 }'`
+    CORE_PER_SOCKET=`lscpu | egrep "^Core" | awk '{ print $4 }'`
+    threads=`expr $THREAD_PER_CPU \* $CORE_PER_SOCKET`
+    yara_args="$yara_args -p $threads"
+  fi
+
+  echo
+  echo "Logging to $log_file"
+  echo "(Ctrl-C to quit running this command, and that takes time so you just wait!)"
+
+  echo > $log_file
+
+  #
+  # Scan with ClamAV
+  #
+  $clamav scan $clamav_args . 2>&1 | tee --append $log_file
+
+  #
+  # Scan with Yara
+  #
+  # yara_args=-wrmfs
+  yara_args=-wms
+
+  # Fast and impossible to format the output
+  # echo > $log_file
+  # $yara scan $yara_args . 2>&1 | tee --append $log_file
+
+  # Run in detached mode at fist
+  container_id=$($yara scan --daemon-start .)
+  # echo "Container ID: $container_id"
+
+  echo "" | tee --append $log_file
+  echo "[Yara]" | tee --append $log_file
+  echo "" | tee --append $log_file
+  echo "" | tee --append $log_file
+
+  files=$(find . -type f | tr '\n' ' ')
+  for f in $files;
+  do
+
+    # docker ps
+
+    path=$(echo $f | sed -E 's|^./||')
+    actual_yara_args="--container=$container_id $yara_args file://$path"
+
+    output=$($yara scan $actual_yara_args 2>&1)
+
+    if [ -n "$output" ];
+    then
+      echo
+      # Put the prefix "Hit: " so that you can list the files and do some things
+      # after running this
+      echo "Hit $path" | tee --append $log_file && \
+      echo "==========" | tee --append $log_file && \
+      echo "$output" | tee --append $log_file && \
+      echo "==========" | tee --append $log_file && \
+      echo | tee --append $log_file
+    else
+      echo "Checked $path"
+    fi
+
+  done
+
+  finished=1
+
+  # This should call "cleanup()"
+  exit
+
+fi
+
+echo "Usage 1: $(basename $0) update"
+echo "Usage 2: $(basename $0) go"
